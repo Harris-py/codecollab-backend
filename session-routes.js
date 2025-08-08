@@ -1,10 +1,24 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Session = require('./Session');
 const CodeState = require('./CodeState');
 const User = require('./User');
 const { authMiddleware } = require('./auth-middleware');
 
 const router = express.Router();
+
+// ObjectId validation middleware
+const validateObjectId = (paramName) => {
+  return (req, res, next) => {
+    const id = req.params[paramName];
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        error: `Invalid ${paramName} format`
+      });
+    }
+    next();
+  };
+};
 
 // Helper function to generate language template
 const getLanguageTemplate = (language) => {
@@ -186,7 +200,7 @@ router.post('/join', authMiddleware, async (req, res) => {
 // @route   GET /api/sessions/:sessionId
 // @desc    Get session details
 // @access  Private
-router.get('/:sessionId', authMiddleware, async (req, res) => {
+router.get('/:sessionId', authMiddleware, validateObjectId('sessionId'), async (req, res) => {
   try {
     const { sessionId } = req.params;
 
@@ -351,7 +365,7 @@ router.get('/public/list', authMiddleware, async (req, res) => {
 // @route   PUT /api/sessions/:sessionId
 // @desc    Update session settings (creator only)
 // @access  Private
-router.put('/:sessionId', authMiddleware, async (req, res) => {
+router.put('/:sessionId', authMiddleware, validateObjectId('sessionId'), async (req, res) => {
   try {
     const { sessionId } = req.params;
     const { name, description, settings } = req.body;
@@ -423,7 +437,7 @@ router.put('/:sessionId', authMiddleware, async (req, res) => {
 // @route   POST /api/sessions/:sessionId/leave
 // @desc    Leave a session
 // @access  Private
-router.post('/:sessionId/leave', authMiddleware, async (req, res) => {
+router.post('/:sessionId/leave', authMiddleware, validateObjectId('sessionId'), async (req, res) => {
   try {
     const { sessionId } = req.params;
 
@@ -456,7 +470,7 @@ router.post('/:sessionId/leave', authMiddleware, async (req, res) => {
 // @route   DELETE /api/sessions/:sessionId
 // @desc    Delete/End session (creator only)
 // @access  Private
-router.delete('/:sessionId', authMiddleware, async (req, res) => {
+router.delete('/:sessionId', authMiddleware, validateObjectId('sessionId'), async (req, res) => {
   try {
     const { sessionId } = req.params;
 
@@ -499,7 +513,7 @@ router.delete('/:sessionId', authMiddleware, async (req, res) => {
 // @route   GET /api/sessions/:sessionId/history
 // @desc    Get session code execution history
 // @access  Private
-router.get('/:sessionId/history', authMiddleware, async (req, res) => {
+router.get('/:sessionId/history', authMiddleware, validateObjectId('sessionId'), async (req, res) => {
   try {
     const { sessionId } = req.params;
 
