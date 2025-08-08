@@ -7,24 +7,22 @@ const { authMiddleware } = require('./auth-middleware');
 
 const router = express.Router();
 
-// Rate limiting for auth routes
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 requests per windowMs
-  message: {
-    error: 'Too many authentication attempts, please try again later.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+// Improved rate limiting configuration
+const createAuthLimiter = (max, windowMs = 15 * 60 * 1000) => {
+  return rateLimit({
+    windowMs,
+    max,
+    message: {
+      error: 'Too many requests, please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+  });
+};
 
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // limit each IP to 5 login attempts per windowMs
-  message: {
-    error: 'Too many login attempts, please try again later.'
-  }
-});
+// Rate limiting for auth routes
+const authLimiter = createAuthLimiter(10); // 10 requests per 15 minutes
+const loginLimiter = createAuthLimiter(5); // 5 login attempts per 15 minutes
 
 // Helper function to generate JWT token
 const generateToken = (userId, rememberMe = false) => {
