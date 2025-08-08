@@ -15,14 +15,33 @@ const executeRoutes = require('./execute-routes');
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup with CORS
+// CORS origin configuration (fixed)
+const corsOrigin = process.env.CLIENT_URL || "http://localhost:3000";
+
+// Socket.io setup with CORS (fixed)
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+    origin: corsOrigin,
     methods: ["GET", "POST"],
     credentials: true
   }
 });
+
+// ObjectId validation middleware
+const validateObjectId = (paramName) => {
+  return (req, res, next) => {
+    const id = req.params[paramName];
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        error: `Invalid ${paramName} format`
+      });
+    }
+    next();
+  };
+};
+
+// Make validation middleware available to routes
+app.locals.validateObjectId = validateObjectId;
 
 // Security middleware
 app.use(helmet({
@@ -30,9 +49,9 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 
-// CORS configuration
+// CORS configuration (fixed)
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:3000",
+  origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -48,6 +67,14 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// Development logging middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use('/api', (req, res, next) => {
+    console.log(`📍 ${req.method} ${req.originalUrl}`);
+    next();
+  });
+}
+
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -62,12 +89,25 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  res.json({
+    message: 'CodeCollab API is working!',
+    timestamp: new Date().toISOString(),
+    routes: {
+      auth: '/api/auth',
+      sessions: '/api/sessions',
+      execute: '/api/execute'
+    }
+  });
+});
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/execute', executeRoutes);
 
-// MongoDB connection
+// MongoDB connection with improved error handling
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -80,6 +120,15 @@ mongoose.connect(process.env.MONGODB_URI, {
   process.exit(1);
 });
 
+// MongoDB connection event handlers
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('📡 MongoDB disconnected');
+});
+
 // Real-time collaboration state management
 const activeSessions = new Map(); // sessionId -> Map of socketId -> userData
 const userSockets = new Map(); // userId -> socketId
@@ -90,21 +139,34 @@ const sessionCursors = new Map(); // sessionId -> Map of socketId -> cursor posi
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // Handle user authentication
+  // Handle user authentication (improved)
   socket.on('authenticate', (userData) => {
-    if (userData && userData.id) {
+    try {
+      if (!userData || !userData.id || !userData.username) {
+        socket.emit('auth-error', { message: 'Invalid user data' });
+        return;
+      }
       userSockets.set(userData.id, socket.id);
       socket.userData = userData;
+      socket.emit('auth-success', { message: 'Authentication successful' });
       console.log(`👤 User authenticated: ${userData.username} (${userData.id})`);
+    } catch (error) {
+      console.error('Authentication error:', error);
+      socket.emit('auth-error', { message: 'Authentication failed' });
     }
   });
 
-  // Join collaborative session
+  // Join collaborative session (improved validation)
   socket.on('join-session', async (data) => {
     const { sessionId, user } = data;
     
     if (!sessionId || !user) {
       socket.emit('error', { message: 'Invalid session data' });
+      return;
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      socket.emit('error', { message: 'Invalid session ID format' });
       return;
     }
 
@@ -153,7 +215,10 @@ io.on('connection', (socket) => {
 
     } catch (error) {
       console.error('Error joining session:', error);
-      socket.emit('error', { message: 'Failed to join session' });
+      socket.emit('error', { 
+        message: 'Failed to join session',
+        code: 'JOIN_SESSION_ERROR'
+      });
     }
   });
 
@@ -247,7 +312,7 @@ io.on('connection', (socket) => {
         language: language
       });
 
-      // Execute code via Piston API (handled by execute-routes.js)
+      // Execute code via Piston API
       const axios = require('axios');
       const response = await axios.post(`${process.env.PISTON_API_URL}/execute`, {
         language: language,
@@ -361,6 +426,18 @@ io.on('connection', (socket) => {
   }
 });
 
+// Error handling middleware for MongoDB errors
+app.use('/api', (err, req, res, next) => {
+  if (err.code === 11000) {
+    // Duplicate key error
+    const field = Object.keys(err.keyPattern)[0];
+    return res.status(409).json({
+      error: `This ${field} is already in use`
+    });
+  }
+  next(err);
+});
+
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err);
@@ -378,10 +455,9 @@ app.use('*', (req, res) => {
   });
 });
 
-// FIXED: Bind to 0.0.0.0 for Railway deployment with port 8080
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, '0.0.0.0', () => {
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
   console.log(`🚀 CodeCollab server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV}`);
-  console.log(`🌐 CORS Origin: ${process.env.CLIENT_URL}`);
+  console.log(`🌐 CORS Origin: ${corsOrigin}`);
 });
