@@ -1,5 +1,20 @@
 const mongoose = require('mongoose');
-
+const generateSessionCode = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+};
+sessionCode: {
+  type: String,
+  required: true,
+  unique: true,
+  length: 6,
+  uppercase: true,
+  default: generateSessionCode  // ✅ Now auto-generates!
+},
 const sessionSchema = new mongoose.Schema({
   // Session Basic Information
   name: {
