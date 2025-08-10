@@ -1,4 +1,6 @@
 const mongoose = require('mongoose');
+
+// Helper function to generate unique session code
 const generateSessionCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let result = '';
@@ -7,14 +9,7 @@ const generateSessionCode = () => {
   }
   return result;
 };
-sessionCode: {
-  type: String,
-  required: true,
-  unique: true,
-  length: 6,
-  uppercase: true,
-  default: generateSessionCode  // ✅ Now auto-generates!
-},
+
 const sessionSchema = new mongoose.Schema({
   // Session Basic Information
   name: {
@@ -31,13 +26,14 @@ const sessionSchema = new mongoose.Schema({
     default: ''
   },
   
-  // Session ID for joining (6-character code)
+  // Session ID for joining (6-character code) - FIXED
   sessionCode: {
     type: String,
     required: true,
     unique: true,
     length: 6,
-    uppercase: true
+    uppercase: true,
+    default: generateSessionCode
   },
 
   // Programming Language
@@ -262,10 +258,26 @@ sessionSchema.virtual('canJoin').get(function() {
          this.activeParticipantsCount < this.settings.maxParticipants;
 });
 
-// Generate unique session code before saving
+// Pre-save middleware to ensure unique session code
 sessionSchema.pre('save', async function(next) {
-  if (!this.sessionCode) {
-    this.sessionCode = await generateUniqueSessionCode();
+  if (this.isNew && !this.sessionCode) {
+    let unique = false;
+    let attempts = 0;
+    
+    while (!unique && attempts < 10) {
+      const code = generateSessionCode();
+      const existing = await this.constructor.findOne({ sessionCode: code });
+      
+      if (!existing) {
+        this.sessionCode = code;
+        unique = true;
+      }
+      attempts++;
+    }
+    
+    if (!unique) {
+      return next(new Error('Failed to generate unique session code'));
+    }
   }
   
   // Update lastActivity
@@ -277,28 +289,6 @@ sessionSchema.pre('save', async function(next) {
   
   next();
 });
-
-// Generate unique 6-character session code
-async function generateUniqueSessionCode() {
-  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let code;
-  let isUnique = false;
-  
-  while (!isUnique) {
-    code = '';
-    for (let i = 0; i < 6; i++) {
-      code += characters.charAt(Math.floor(Math.random() * characters.length));
-    }
-    
-    // Check if code already exists
-    const existingSession = await mongoose.model('Session').findOne({ sessionCode: code });
-    if (!existingSession) {
-      isUnique = true;
-    }
-  }
-  
-  return code;
-}
 
 // Instance method to add participant
 sessionSchema.methods.addParticipant = function(user, role = 'editor') {
@@ -312,6 +302,7 @@ sessionSchema.methods.addParticipant = function(user, role = 'editor') {
     existingParticipant.isActive = true;
     existingParticipant.joinedAt = new Date();
     existingParticipant.lastActivity = new Date();
+    existingParticipant.role = role;
   } else {
     // Add new participant
     const colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#ffecd2'];
@@ -324,6 +315,7 @@ sessionSchema.methods.addParticipant = function(user, role = 'editor') {
       role: role,
       isActive: true,
       lastActivity: new Date(),
+      cursor: { line: 0, column: 0 },
       color: color
     });
     
@@ -447,3 +439,5 @@ sessionSchema.statics.cleanupExpiredSessions = async function() {
 };
 
 module.exports = mongoose.model('Session', sessionSchema);
+
+
