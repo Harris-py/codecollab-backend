@@ -1,5 +1,4 @@
-
-// server.js - Updated with automatic index fix
+// server.js - Complete fixed version for Railway deployment
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -34,10 +33,9 @@ const getCorsOrigins = () => {
   // Common frontend deployment platforms
   if (process.env.NODE_ENV === 'production') {
     origins.push(
-      // Add your frontend URLs here
       'https://codecollab-frontend.vercel.app',
       'https://codecollab-frontend.netlify.app',
-      // Add any other frontend domains you might use
+      'https://codecollab-frontend-rho.vercel.app'
     );
   }
   
@@ -46,13 +44,8 @@ const getCorsOrigins = () => {
     origins.push('http://localhost:3000', 'http://127.0.0.1:3000');
   }
   
-  // If no origins specified, allow all in development, restrict in production
-  if (origins.length === 0) {
-    return process.env.NODE_ENV === 'development' ? true : false;
-  }
-  
   console.log('🌐 Allowed CORS Origins:', origins);
-  return origins;
+  return origins.length > 0 ? origins : true;
 };
 
 const corsOrigins = getCorsOrigins();
@@ -73,15 +66,7 @@ const io = socketIo(server, {
 
 // Enhanced security middleware for production
 app.use(helmet({
-  contentSecurityPolicy: process.env.NODE_ENV === 'production' ? {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "wss:", "ws:"]
-    }
-  } : false,
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
@@ -185,33 +170,29 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// MongoDB connection with production settings and index fix
+// Simple MongoDB connection (no deprecated options)
 const connectDB = async () => {
   try {
-    const mongoOptions = {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
-      bufferMaxEntries: 0,
-      bufferCommands: false,
-    };
-
-    if (process.env.NODE_ENV === 'production') {
-      mongoOptions.ssl = true;
-      mongoOptions.retryWrites = true;
-    }
-
-    await mongoose.connect(process.env.MONGODB_URI, mongoOptions);
-    console.log('✅ Connected to MongoDB');
+    console.log('🔗 Connecting to MongoDB...');
+    
+    // Simple connection with no deprecated options
+    await mongoose.connect(process.env.MONGODB_URI);
+    
+    console.log('✅ Connected to MongoDB successfully');
     
     // Fix the index issue automatically
     await fixDatabaseIndexes();
     
   } catch (error) {
     console.error('❌ MongoDB connection error:', error);
-    process.exit(1);
+    
+    // In production, retry connection after delay
+    if (process.env.NODE_ENV === 'production') {
+      console.log('🔄 Retrying connection in 5 seconds...');
+      setTimeout(connectDB, 5000);
+    } else {
+      process.exit(1);
+    }
   }
 };
 
@@ -261,6 +242,7 @@ const fixDatabaseIndexes = async () => {
   }
 };
 
+// Call the connection
 connectDB();
 
 // MongoDB event handlers
