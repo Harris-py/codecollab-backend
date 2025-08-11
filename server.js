@@ -1,3 +1,4 @@
+// server.js - Complete updated version
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -15,10 +16,17 @@ const executeRoutes = require('./execute-routes');
 const app = express();
 const server = http.createServer(app);
 
-// CORS origin configuration (fixed)
+// ⭐ TRUST PROXY CONFIGURATION - CRITICAL FIX
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+} else {
+  app.set('trust proxy', true);
+}
+
+// CORS origin configuration
 const corsOrigin = process.env.CLIENT_URL || "http://localhost:3000";
 
-// Socket.io setup with CORS (fixed)
+// Socket.io setup with CORS
 const io = socketIo(server, {
   cors: {
     origin: corsOrigin,
@@ -40,16 +48,15 @@ const validateObjectId = (paramName) => {
   };
 };
 
-// Make validation middleware available to routes
 app.locals.validateObjectId = validateObjectId;
 
 // Security middleware
 app.use(helmet({
-  contentSecurityPolicy: false, // Allow for development
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
-// CORS configuration (fixed)
+// CORS configuration
 app.use(cors({
   origin: corsOrigin,
   credentials: true,
@@ -57,20 +64,42 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Rate limiting
+// ⭐ IMPROVED RATE LIMITING with proxy handling
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  
+  keyGenerator: (req) => {
+    return req.ip; // Uses real IP when trust proxy is set
+  },
+  
+  skip: (req) => {
+    return req.path === '/health' || req.path === '/api/test';
+  },
+  
   message: {
-    error: 'Too many requests from this IP, please try again later.'
+    error: 'Too many requests from this IP, please try again later.',
+    retryAfter: '15 minutes'
+  },
+  
+  standardHeaders: true,
+  legacyHeaders: false,
+  
+  handler: (req, res) => {
+    console.log(`Rate limit exceeded for IP: ${req.ip}`);
+    res.status(429).json({
+      error: 'Too many requests from this IP, please try again later.',
+      retryAfter: Math.ceil((req.rateLimit.resetTime - Date.now()) / 1000)
+    });
   }
 });
+
 app.use('/api/', limiter);
 
 // Development logging middleware
 if (process.env.NODE_ENV === 'development') {
   app.use('/api', (req, res, next) => {
-    console.log(`📍 ${req.method} ${req.originalUrl}`);
+    console.log(`📍 ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
     next();
   });
 }
@@ -85,7 +114,8 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    environment: process.env.NODE_ENV
+    environment: process.env.NODE_ENV,
+    ip: req.ip
   });
 });
 
@@ -94,11 +124,8 @@ app.get('/api/test', (req, res) => {
   res.json({
     message: 'CodeCollab API is working!',
     timestamp: new Date().toISOString(),
-    routes: {
-      auth: '/api/auth',
-      sessions: '/api/sessions',
-      execute: '/api/execute'
-    }
+    ip: req.ip,
+    trustProxy: app.get('trust proxy')
   });
 });
 
@@ -107,7 +134,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/execute', executeRoutes);
 
-// MongoDB connection with improved error handling
+// MongoDB connection
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -120,7 +147,6 @@ mongoose.connect(process.env.MONGODB_URI, {
   process.exit(1);
 });
 
-// MongoDB connection event handlers
 mongoose.connection.on('error', (err) => {
   console.error('❌ MongoDB connection error:', err);
 });
@@ -129,17 +155,18 @@ mongoose.connection.on('disconnected', () => {
   console.log('📡 MongoDB disconnected');
 });
 
-// Real-time collaboration state management
+// ⭐ REAL-TIME COLLABORATION STATE MANAGEMENT
 const activeSessions = new Map(); // sessionId -> Map of socketId -> userData
 const userSockets = new Map(); // userId -> socketId
 const sessionCode = new Map(); // sessionId -> current code content
 const sessionCursors = new Map(); // sessionId -> Map of socketId -> cursor position
+const sessionChats = new Map(); // sessionId -> array of chat messages
 
-// Socket.io connection handling
+// ⭐ SOCKET.IO CONNECTION HANDLING - COMPLETE IMPLEMENTATION
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // Handle user authentication (improved)
+  // Handle user authentication
   socket.on('authenticate', (userData) => {
     try {
       if (!userData || !userData.id || !userData.username) {
@@ -156,17 +183,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Join collaborative session (improved validation)
+  // Join collaborative session
   socket.on('join-session', async (data) => {
     const { sessionId, user } = data;
     
     if (!sessionId || !user) {
       socket.emit('error', { message: 'Invalid session data' });
-      return;
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
-      socket.emit('error', { message: 'Invalid session ID format' });
       return;
     }
 
@@ -178,8 +200,9 @@ io.on('connection', (socket) => {
       // Initialize session maps if needed
       if (!activeSessions.has(sessionId)) {
         activeSessions.set(sessionId, new Map());
-        sessionCode.set(sessionId, '// Welcome to CodeCollab!\n// Start typing to collaborate in real-time\n\nconsole.log("Hello, World!");');
+        sessionCode.set(sessionId, '// Welcome to CodeCollab!\n// Start coding together!\n\nconsole.log("Hello, World!");');
         sessionCursors.set(sessionId, new Map());
+        sessionChats.set(sessionId, []);
       }
 
       // Add user to session
@@ -190,12 +213,16 @@ io.on('connection', (socket) => {
         joinedAt: new Date(),
         isTyping: false,
         status: 'active',
-        cursor: { line: 0, column: 0 }
+        cursor: { line: 1, column: 1 }
       });
 
       // Send current code to new user
       const currentCode = sessionCode.get(sessionId);
       socket.emit('code-sync', { code: currentCode });
+
+      // Send chat history to new user
+      const chatHistory = sessionChats.get(sessionId);
+      socket.emit('chat-history', { messages: chatHistory });
 
       // Send current participants to new user
       const participants = Array.from(sessionUsers.values());
@@ -215,10 +242,7 @@ io.on('connection', (socket) => {
 
     } catch (error) {
       console.error('Error joining session:', error);
-      socket.emit('error', { 
-        message: 'Failed to join session',
-        code: 'JOIN_SESSION_ERROR'
-      });
+      socket.emit('error', { message: 'Failed to join session' });
     }
   });
 
@@ -237,37 +261,14 @@ io.on('connection', (socket) => {
       // Broadcast code change to all other users in session
       socket.to(sessionId).emit('code-change', {
         code: code,
-        operation: operation,
+        operation: operation || 'edit',
         from: socket.userData?.username || 'Anonymous',
+        fromUserId: socket.userData?.id,
         socketId: socket.id,
         timestamp: new Date()
       });
 
-      // Update user typing status
-      const sessionUsers = activeSessions.get(sessionId);
-      if (sessionUsers && sessionUsers.has(socket.id)) {
-        const userData = sessionUsers.get(socket.id);
-        userData.isTyping = true;
-        userData.lastActivity = new Date();
-        
-        // Clear typing status after 2 seconds
-        setTimeout(() => {
-          if (sessionUsers.has(socket.id)) {
-            sessionUsers.get(socket.id).isTyping = false;
-            socket.to(sessionId).emit('typing-status-update', {
-              socketId: socket.id,
-              isTyping: false
-            });
-          }
-        }, 2000);
-
-        // Broadcast typing status
-        socket.to(sessionId).emit('typing-status-update', {
-          socketId: socket.id,
-          username: userData.username,
-          isTyping: true
-        });
-      }
+      console.log(`📝 Code updated in session ${sessionId} by ${socket.userData?.username}`);
 
     } catch (error) {
       console.error('Error handling code change:', error);
@@ -278,69 +279,32 @@ io.on('connection', (socket) => {
   socket.on('cursor-position', (data) => {
     const { sessionId, position } = data;
     
-    if (!sessionId || !position) return;
+    if (!sessionId || !socket.currentSession) {
+      return;
+    }
 
     try {
       // Update cursor position
-      const cursors = sessionCursors.get(sessionId);
-      if (cursors) {
-        cursors.set(socket.id, position);
-        
-        // Broadcast cursor position to others
-        socket.to(sessionId).emit('cursor-update', {
-          socketId: socket.id,
+      if (sessionCursors.has(sessionId)) {
+        sessionCursors.get(sessionId).set(socket.id, {
+          userId: socket.userData?.id,
           username: socket.userData?.username,
           position: position,
-          color: socket.userData?.color || '#667eea'
+          lastUpdate: new Date()
         });
       }
-    } catch (error) {
-      console.error('Error updating cursor position:', error);
-    }
-  });
 
-  // Handle code execution requests
-  socket.on('execute-code', async (data) => {
-    const { sessionId, code, language, input } = data;
-    
-    if (!sessionId) return;
-
-    try {
-      // Notify session about execution start
-      io.to(sessionId).emit('execution-started', {
-        username: socket.userData?.username || 'Anonymous',
-        language: language
-      });
-
-      // Execute code via Piston API
-      const axios = require('axios');
-      const response = await axios.post(`${process.env.PISTON_API_URL}/execute`, {
-        language: language,
-        version: '*',
-        files: [{ content: code }],
-        stdin: input || ''
-      });
-
-      const result = {
-        output: response.data.run.stdout || response.data.run.stderr || 'No output',
-        executionTime: response.data.run.runtime || 0,
-        memoryUsed: response.data.run.memory || 0,
-        exitCode: response.data.run.code,
+      // Broadcast cursor position to other users
+      socket.to(sessionId).emit('cursor-position', {
+        userId: socket.userData?.id,
+        username: socket.userData?.username,
+        position: position,
+        socketId: socket.id,
         timestamp: new Date()
-      };
-
-      // Broadcast execution result to session
-      io.to(sessionId).emit('execution-result', {
-        result: result,
-        executedBy: socket.userData?.username || 'Anonymous'
       });
 
     } catch (error) {
-      console.error('Code execution error:', error);
-      io.to(sessionId).emit('execution-error', {
-        error: 'Code execution failed',
-        message: error.message
-      });
+      console.error('Error handling cursor position:', error);
     }
   });
 
@@ -348,116 +312,130 @@ io.on('connection', (socket) => {
   socket.on('chat-message', (data) => {
     const { sessionId, message } = data;
     
-    if (!sessionId || !message || !socket.userData) return;
+    if (!sessionId || !message || !socket.currentSession) {
+      return;
+    }
 
-    const chatMessage = {
-      id: Date.now() + Math.random(),
-      username: socket.userData.username,
-      message: message.trim(),
-      timestamp: new Date(),
-      socketId: socket.id
-    };
+    try {
+      const chatMessage = {
+        id: Date.now() + Math.random(),
+        message: message.trim(),
+        userId: socket.userData?.id,
+        username: socket.userData?.username,
+        timestamp: new Date(),
+        socketId: socket.id
+      };
 
-    // Broadcast to session
-    io.to(sessionId).emit('chat-message', chatMessage);
+      // Store message in session chat history
+      if (sessionChats.has(sessionId)) {
+        const chatHistory = sessionChats.get(sessionId);
+        chatHistory.push(chatMessage);
+        
+        // Keep only last 100 messages
+        if (chatHistory.length > 100) {
+          chatHistory.splice(0, chatHistory.length - 100);
+        }
+      }
+
+      // Broadcast message to all users in session (including sender)
+      io.to(sessionId).emit('chat-message', chatMessage);
+
+      console.log(`💬 Chat message in session ${sessionId} from ${socket.userData?.username}: ${message}`);
+
+    } catch (error) {
+      console.error('Error handling chat message:', error);
+    }
   });
 
-  // Handle session leave
-  socket.on('leave-session', (sessionId) => {
-    handleUserLeaveSession(socket, sessionId);
+  // Handle typing indicators
+  socket.on('typing-start', (data) => {
+    const { sessionId } = data;
+    if (sessionId && socket.currentSession) {
+      socket.to(sessionId).emit('user-typing', {
+        userId: socket.userData?.id,
+        username: socket.userData?.username,
+        isTyping: true
+      });
+    }
+  });
+
+  socket.on('typing-stop', (data) => {
+    const { sessionId } = data;
+    if (sessionId && socket.currentSession) {
+      socket.to(sessionId).emit('user-typing', {
+        userId: socket.userData?.id,
+        username: socket.userData?.username,
+        isTyping: false
+      });
+    }
   });
 
   // Handle disconnect
   socket.on('disconnect', () => {
     console.log('🔌 User disconnected:', socket.id);
     
-    // Remove from user sockets map
-    if (socket.userData && socket.userData.id) {
+    if (socket.currentSession) {
+      const sessionId = socket.currentSession;
+      
+      // Remove user from session
+      if (activeSessions.has(sessionId)) {
+        activeSessions.get(sessionId).delete(socket.id);
+      }
+      
+      // Remove cursor
+      if (sessionCursors.has(sessionId)) {
+        sessionCursors.get(sessionId).delete(socket.id);
+      }
+
+      // Notify other users
+      socket.to(sessionId).emit('user-left', {
+        socketId: socket.id,
+        userId: socket.userData?.id,
+        username: socket.userData?.username,
+        timestamp: new Date()
+      });
+
+      // Update participant count
+      const remainingUsers = activeSessions.get(sessionId);
+      if (remainingUsers) {
+        io.to(sessionId).emit('participant-count-update', remainingUsers.size);
+      }
+    }
+
+    // Remove from global user tracking
+    if (socket.userData?.id) {
       userSockets.delete(socket.userData.id);
     }
-
-    // Handle leaving current session
-    if (socket.currentSession) {
-      handleUserLeaveSession(socket, socket.currentSession);
-    }
   });
 
-  // Helper function to handle user leaving session
-  function handleUserLeaveSession(socket, sessionId) {
-    try {
-      const sessionUsers = activeSessions.get(sessionId);
-      if (sessionUsers && sessionUsers.has(socket.id)) {
-        const userData = sessionUsers.get(socket.id);
-        sessionUsers.delete(socket.id);
-
-        // Remove cursor
-        const cursors = sessionCursors.get(sessionId);
-        if (cursors) {
-          cursors.delete(socket.id);
-        }
-
-        // Notify others about user leaving
-        socket.to(sessionId).emit('user-left', {
-          user: userData,
-          socketId: socket.id,
-          timestamp: new Date()
-        });
-
-        // Update participant count
-        const remainingParticipants = Array.from(sessionUsers.values());
-        io.to(sessionId).emit('participant-count-update', remainingParticipants.length);
-
-        // Leave the socket room
-        socket.leave(sessionId);
-
-        console.log(`👋 User ${userData.username} left session ${sessionId}`);
-
-        // Clean up empty sessions
-        if (sessionUsers.size === 0) {
-          activeSessions.delete(sessionId);
-          sessionCode.delete(sessionId);
-          sessionCursors.delete(sessionId);
-          console.log(`🗑️ Cleaned up empty session ${sessionId}`);
-        }
+  // Handle leave session
+  socket.on('leave-session', (data) => {
+    const { sessionId } = data;
+    
+    if (sessionId && socket.currentSession === sessionId) {
+      socket.leave(sessionId);
+      socket.currentSession = null;
+      
+      // Remove from session tracking
+      if (activeSessions.has(sessionId)) {
+        activeSessions.get(sessionId).delete(socket.id);
       }
-    } catch (error) {
-      console.error('Error handling user leave:', error);
+      
+      // Notify others
+      socket.to(sessionId).emit('user-left', {
+        socketId: socket.id,
+        userId: socket.userData?.id,
+        username: socket.userData?.username
+      });
     }
-  }
-});
-
-// Error handling middleware for MongoDB errors
-app.use('/api', (err, req, res, next) => {
-  if (err.code === 11000) {
-    // Duplicate key error
-    const field = Object.keys(err.keyPattern)[0];
-    return res.status(409).json({
-      error: `This ${field} is already in use`
-    });
-  }
-  next(err);
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('❌ Error:', err);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Route not found',
-    path: req.originalUrl 
-  });
-});
-
+// Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 CodeCollab server running on port ${PORT}`);
-  console.log(`📍 Environment: ${process.env.NODE_ENV}`);
-  console.log(`🌐 CORS Origin: ${corsOrigin}`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔗 CORS Origin: ${corsOrigin}`);
+  console.log(`🛡️  Trust Proxy: ${app.get('trust proxy')}`);
 });
