@@ -1,4 +1,3 @@
-// Models/CodeState.js - Fixed version
 const mongoose = require('mongoose');
 
 // Real-time code state management for collaborative editing
@@ -92,15 +91,10 @@ const codeStateSchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     },
-    // FIXED: Remove unique constraint and make operationId optional
     operationId: {
       type: String,
-      // Remove the unique constraint that was causing issues
-      // unique: true, 
-      // Make it optional and provide default
-      default: function() {
-        return new mongoose.Types.ObjectId().toString() + '_' + Date.now();
-      }
+      required: true,
+      unique: true
     }
   }],
 
@@ -143,6 +137,38 @@ const codeStateSchema = new mongoose.Schema({
       type: Date
     },
     executionTime: {
+      type: Number, // in milliseconds
+      default: 0
+    }
+  },
+
+  // Version control (simplified)
+  version: {
+    type: Number,
+    default: 1
+  },
+  
+  // Auto-save state
+  lastSaved: {
+    type: Date,
+    default: Date.now
+  },
+  hasUnsavedChanges: {
+    type: Boolean,
+    default: false
+  },
+
+  // Performance metrics
+  metrics: {
+    totalOperations: {
+      type: Number,
+      default: 0
+    },
+    averageResponseTime: {
+      type: Number, // in milliseconds
+      default: 0
+    },
+    conflictResolutions: {
       type: Number,
       default: 0
     }
@@ -150,126 +176,204 @@ const codeStateSchema = new mongoose.Schema({
 
 }, {
   timestamps: true,
-  toJSON: { virtuals: true }
+  toJSON: { 
+    virtuals: true,
+    transform: function(doc, ret) {
+      delete ret.__v;
+      return ret;
+    }
+  }
 });
 
-// Indexes for performance (FIXED: Remove problematic unique index)
+// Indexes for real-time performance
 codeStateSchema.index({ sessionId: 1 });
 codeStateSchema.index({ 'cursors.userId': 1 });
 codeStateSchema.index({ 'operations.timestamp': -1 });
-// REMOVED: codeStateSchema.index({ 'operations.operationId': 1 }, { unique: true });
+codeStateSchema.index({ 'operations.operationId': 1 }, { unique: true, sparse: true });
 
-// Virtual for active cursors count
-codeStateSchema.virtual('activeCursorsCount').get(function() {
-  return this.cursors.filter(cursor => cursor.isActive).length;
+// Virtual for active cursors
+codeStateSchema.virtual('activeCursors').get(function() {
+  return this.cursors.filter(cursor => 
+    cursor.isActive && 
+    (Date.now() - cursor.lastUpdate.getTime()) < 30000 // Active in last 30 seconds
+  );
 });
 
-// Virtual for recent operations
-codeStateSchema.virtual('recentOperations').get(function() {
-  return this.operations
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-    .slice(0, 10);
+// Virtual for lines of code
+codeStateSchema.virtual('linesOfCode').get(function() {
+  return this.content ? this.content.split('\n').length : 0;
 });
 
-// Method to add operation with proper ID generation
-codeStateSchema.methods.addOperation = function(operationData) {
-  const operation = {
-    ...operationData,
-    operationId: new mongoose.Types.ObjectId().toString() + '_' + Date.now(),
-    timestamp: new Date()
-  };
+// Virtual for character count
+codeStateSchema.virtual('characterCount').get(function() {
+  return this.content ? this.content.length : 0;
+});
+
+// Method to apply operation (simplified operational transform)
+codeStateSchema.methods.applyOperation = function(operation) {
+  const { type, position, content, length } = operation;
+  const lines = this.content.split('\n');
   
-  this.operations.push(operation);
-  
-  // Keep only last 100 operations for performance
-  if (this.operations.length > 100) {
-    this.operations = this.operations.slice(-100);
+  try {
+    switch (type) {
+      case 'insert':
+        if (position.line < lines.length) {
+          const line = lines[position.line];
+          const beforeCursor = line.substring(0, position.column);
+          const afterCursor = line.substring(position.column);
+          
+          if (content.includes('\n')) {
+            // Multi-line insert
+            const insertLines = content.split('\n');
+            lines[position.line] = beforeCursor + insertLines[0];
+            
+            for (let i = 1; i < insertLines.length; i++) {
+              lines.splice(position.line + i, 0, insertLines[i]);
+            }
+            
+            if (insertLines.length > 1) {
+              const lastIndex = position.line + insertLines.length - 1;
+              lines[lastIndex] = lines[lastIndex] + afterCursor;
+            }
+          } else {
+            // Single line insert
+            lines[position.line] = beforeCursor + content + afterCursor;
+          }
+        }
+        break;
+        
+      case 'delete':
+        if (position.line < lines.length) {
+          const line = lines[position.line];
+          const beforeCursor = line.substring(0, position.column);
+          const afterCursor = line.substring(position.column + length);
+          lines[position.line] = beforeCursor + afterCursor;
+        }
+        break;
+        
+      case 'replace':
+        if (position.line < lines.length) {
+          const line = lines[position.line];
+          const beforeCursor = line.substring(0, position.column);
+          const afterCursor = line.substring(position.column + length);
+          lines[position.line] = beforeCursor + content + afterCursor;
+        }
+        break;
+    }
+    
+    this.content = lines.join('\n');
+    this.version += 1;
+    this.hasUnsavedChanges = true;
+    this.metrics.totalOperations += 1;
+    
+    // Add to operations history
+    this.operations.unshift({
+      ...operation,
+      operationId: `${operation.userId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    });
+    
+    // Keep only last 100 operations
+    if (this.operations.length > 100) {
+      this.operations = this.operations.slice(0, 100);
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error applying operation:', error);
+    return false;
   }
-  
-  return this.save();
 };
 
 // Method to update cursor position
-codeStateSchema.methods.updateCursor = function(userId, username, position) {
-  const existingCursorIndex = this.cursors.findIndex(
-    cursor => cursor.userId.toString() === userId.toString()
+codeStateSchema.methods.updateCursor = function(userId, username, position, color = '#667eea') {
+  const existingCursor = this.cursors.find(cursor => 
+    cursor.userId.toString() === userId.toString()
   );
   
-  if (existingCursorIndex >= 0) {
-    this.cursors[existingCursorIndex].position = position;
-    this.cursors[existingCursorIndex].lastUpdate = new Date();
-    this.cursors[existingCursorIndex].isActive = true;
+  if (existingCursor) {
+    existingCursor.position = position;
+    existingCursor.lastUpdate = new Date();
+    existingCursor.isActive = true;
   } else {
     this.cursors.push({
-      userId,
-      username,
-      position,
+      userId: userId,
+      username: username,
+      position: position,
+      color: color,
       isActive: true,
       lastUpdate: new Date()
     });
   }
   
+  // Clean up inactive cursors (older than 1 minute)
+  this.cursors = this.cursors.filter(cursor => 
+    (Date.now() - cursor.lastUpdate.getTime()) < 60000
+  );
+  
   return this.save();
 };
 
-// Method to remove inactive cursors
-codeStateSchema.methods.removeInactiveCursors = function(timeoutMinutes = 5) {
-  const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000);
-  this.cursors = this.cursors.filter(cursor => cursor.lastUpdate > cutoff);
-  return this.save();
-};
-
-// Method to add typing indicator
-codeStateSchema.methods.addTypingUser = function(userId, username, position) {
+// Method to set typing indicator
+codeStateSchema.methods.setTyping = function(userId, username, position) {
   // Remove existing typing indicator for this user
-  this.typingUsers = this.typingUsers.filter(
-    user => user.userId.toString() !== userId.toString()
+  this.typingUsers = this.typingUsers.filter(user => 
+    user.userId.toString() !== userId.toString()
   );
   
   // Add new typing indicator
   this.typingUsers.push({
-    userId,
-    username,
-    position,
+    userId: userId,
+    username: username,
+    position: position,
     startedAt: new Date()
   });
   
-  return this.save();
-};
-
-// Method to remove typing indicator
-codeStateSchema.methods.removeTypingUser = function(userId) {
-  this.typingUsers = this.typingUsers.filter(
-    user => user.userId.toString() !== userId.toString()
-  );
-  return this.save();
-};
-
-// Static method to cleanup old typing indicators
-codeStateSchema.statics.cleanupTypingIndicators = function() {
-  const cutoff = new Date(Date.now() - 30 * 1000); // 30 seconds
+  // Auto-remove after 3 seconds
+  setTimeout(() => {
+    this.typingUsers = this.typingUsers.filter(user => 
+      user.userId.toString() !== userId.toString() ||
+      (Date.now() - user.startedAt.getTime()) < 3000
+    );
+  }, 3000);
   
-  return this.updateMany(
-    {},
-    {
-      $pull: {
-        typingUsers: {
-          startedAt: { $lt: cutoff }
-        }
-      }
-    }
-  );
+  return this.save();
 };
 
-// Static method to find or create code state for session
-codeStateSchema.statics.findOrCreateForSession = async function(sessionId, language) {
-  let codeState = await this.findOne({ sessionId });
+// Method to clear typing indicator
+codeStateSchema.methods.clearTyping = function(userId) {
+  this.typingUsers = this.typingUsers.filter(user => 
+    user.userId.toString() !== userId.toString()
+  );
+  return this.save();
+};
+
+// Method to update execution state
+codeStateSchema.methods.updateExecution = function(executionData) {
+  this.execution = {
+    ...this.execution,
+    ...executionData,
+    lastExecutedAt: new Date()
+  };
+  return this.save();
+};
+
+// Method to save code (mark as saved)
+codeStateSchema.methods.saveCode = function() {
+  this.lastSaved = new Date();
+  this.hasUnsavedChanges = false;
+  return this.save();
+};
+
+// Static method to get or create code state for session
+codeStateSchema.statics.getOrCreateForSession = async function(sessionId, language, initialContent = '') {
+  let codeState = await this.findOne({ sessionId: sessionId });
   
   if (!codeState) {
     codeState = new this({
-      sessionId,
-      language,
-      content: getLanguageTemplate(language)
+      sessionId: sessionId,
+      language: language,
+      content: initialContent,
+      version: 1
     });
     await codeState.save();
   }
@@ -277,18 +381,27 @@ codeStateSchema.statics.findOrCreateForSession = async function(sessionId, langu
   return codeState;
 };
 
-// Helper function to get language template
-function getLanguageTemplate(language) {
-  const templates = {
-    javascript: '// Welcome to CodeCollab - JavaScript Session\n// Start coding together in real-time!\n\nconsole.log("Hello, World!");',
-    python: '# Welcome to CodeCollab - Python Session\n# Start coding together in real-time!\n\nprint("Hello, World!")',
-    cpp: '// Welcome to CodeCollab - C++ Session\n// Start coding together in real-time!\n\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, World!" << endl;\n    return 0;\n}',
-    c: '// Welcome to CodeCollab - C Session\n// Start coding together in real-time!\n\n#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}',
-    java: '// Welcome to CodeCollab - Java Session\n// Start coding together in real-time!\n\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, World!");\n    }\n}',
-    go: '// Welcome to CodeCollab - Go Session\n// Start coding together in real-time!\n\npackage main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, World!")\n}',
-    rust: '// Welcome to CodeCollab - Rust Session\n// Start coding together in real-time!\n\nfn main() {\n    println!("Hello, World!");\n}'
+// Static method to cleanup inactive sessions
+codeStateSchema.statics.cleanupInactive = async function() {
+  const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
+  
+  const result = await this.deleteMany({
+    updatedAt: { $lt: cutoffTime }
+  });
+  
+  console.log(`🗑️ Cleaned up ${result.deletedCount} inactive code states`);
+  return result;
+};
+
+// Method to get conflict resolution statistics
+codeStateSchema.methods.getConflictStats = function() {
+  return {
+    totalOperations: this.metrics.totalOperations,
+    conflictResolutions: this.metrics.conflictResolutions,
+    averageResponseTime: this.metrics.averageResponseTime,
+    version: this.version,
+    activeCursorsCount: this.activeCursors.length
   };
-  return templates[language] || templates.javascript;
-}
+};
 
 module.exports = mongoose.model('CodeState', codeStateSchema);

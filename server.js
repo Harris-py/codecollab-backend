@@ -1,4 +1,3 @@
-// server.js - Complete fixed version for Railway deployment
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -16,245 +15,91 @@ const executeRoutes = require('./execute-routes');
 const app = express();
 const server = http.createServer(app);
 
-// Production-ready CORS configuration for Railway
-const getCorsOrigins = () => {
-  const origins = [];
-  
-  // Add explicit client URL if set
-  if (process.env.CLIENT_URL) {
-    origins.push(process.env.CLIENT_URL);
-  }
-  
-  // Add additional allowed origins
-  if (process.env.ALLOWED_ORIGINS) {
-    origins.push(...process.env.ALLOWED_ORIGINS.split(','));
-  }
-  
-  // Common frontend deployment platforms
-  if (process.env.NODE_ENV === 'production') {
-    origins.push(
-      'https://codecollab-frontend.vercel.app',
-      'https://codecollab-frontend.netlify.app',
-      'https://codecollab-frontend-rho.vercel.app'
-    );
-  }
-  
-  // Development origins
-  if (process.env.NODE_ENV === 'development') {
-    origins.push('http://localhost:3000', 'http://127.0.0.1:3000');
-  }
-  
-  console.log('🌐 Allowed CORS Origins:', origins);
-  return origins.length > 0 ? origins : true;
-};
+// CORS origin configuration (fixed)
+const corsOrigin = process.env.CLIENT_URL || "http://localhost:3000";
 
-const corsOrigins = getCorsOrigins();
-
-// Socket.io setup with production-ready CORS
+// Socket.io setup with CORS (fixed)
 const io = socketIo(server, {
   cors: {
-    origin: corsOrigins,
+    origin: corsOrigin,
     methods: ["GET", "POST"],
-    credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization"]
-  },
-  transports: ['websocket', 'polling'],
-  allowEIO3: true,
-  pingTimeout: 60000,
-  pingInterval: 25000
+    credentials: true
+  }
 });
 
-// Enhanced security middleware for production
+// ObjectId validation middleware
+const validateObjectId = (paramName) => {
+  return (req, res, next) => {
+    const id = req.params[paramName];
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        error: `Invalid ${paramName} format`
+      });
+    }
+    next();
+  };
+};
+
+// Make validation middleware available to routes
+app.locals.validateObjectId = validateObjectId;
+
+// Security middleware
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: false, // Allow for development
   crossOriginEmbedderPolicy: false
 }));
 
-// CORS configuration
+// CORS configuration (fixed)
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin) return callback(null, true);
-    
-    if (Array.isArray(corsOrigins)) {
-      if (corsOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-    } else if (corsOrigins === true) {
-      return callback(null, true);
-    }
-    
-    console.log('❌ CORS blocked origin:', origin);
-    callback(new Error('Not allowed by CORS'));
-  },
+  origin: corsOrigin,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Production-ready rate limiting
-const createRateLimiter = () => {
-  const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
-  const maxRequests = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100;
-  
-  return rateLimit({
-    windowMs,
-    max: maxRequests,
-    message: { error: 'Too many requests from this IP, please try again later.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => req.path === '/health'
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  message: {
+    error: 'Too many requests from this IP, please try again later.'
+  }
+});
+app.use('/api/', limiter);
+
+// Development logging middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use('/api', (req, res, next) => {
+    console.log(`📍 ${req.method} ${req.originalUrl}`);
+    next();
   });
-};
-
-app.use('/api/', createRateLimiter());
-
-// Request logging
-const requestLogger = (req, res, next) => {
-  const start = Date.now();
-  
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    const log = `${req.method} ${req.originalUrl} ${res.statusCode} ${duration}ms`;
-    
-    if (res.statusCode >= 400) {
-      console.error('❌', log);
-    } else if (process.env.NODE_ENV === 'development') {
-      console.log('✅', log);
-    }
-  });
-  
-  next();
-};
-
-if (process.env.NODE_ENV !== 'test') {
-  app.use(requestLogger);
 }
 
 // Body parsing middleware
-app.use(express.json({ 
-  limit: process.env.MAX_JSON_SIZE || '10mb',
-  strict: true
-}));
-app.use(express.urlencoded({ 
-  extended: true, 
-  limit: process.env.MAX_URL_ENCODED_SIZE || '10mb'
-}));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// Enhanced health check
+// Health check endpoint
 app.get('/health', (req, res) => {
-  const healthCheck = {
-    status: 'OK',
+  res.status(200).json({ 
+    status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    environment: process.env.NODE_ENV,
-    version: process.env.npm_package_version || '1.0.0',
-    memory: process.memoryUsage(),
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    railway: {
-      service: process.env.RAILWAY_SERVICE_NAME || 'codecollab-backend',
-      deployment: process.env.RAILWAY_DEPLOYMENT_ID || 'unknown'
-    }
-  };
-  
-  res.status(200).json(healthCheck);
+    environment: process.env.NODE_ENV
+  });
 });
 
-// API test endpoint
+// Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({
     message: 'CodeCollab API is working!',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV,
-    cors: corsOrigins
+    routes: {
+      auth: '/api/auth',
+      sessions: '/api/sessions',
+      execute: '/api/execute'
+    }
   });
-});
-
-// Simple MongoDB connection (no deprecated options)
-const connectDB = async () => {
-  try {
-    console.log('🔗 Connecting to MongoDB...');
-    
-    // Simple connection with no deprecated options
-    await mongoose.connect(process.env.MONGODB_URI);
-    
-    console.log('✅ Connected to MongoDB successfully');
-    
-    // Fix the index issue automatically
-    await fixDatabaseIndexes();
-    
-  } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
-    
-    // In production, retry connection after delay
-    if (process.env.NODE_ENV === 'production') {
-      console.log('🔄 Retrying connection in 5 seconds...');
-      setTimeout(connectDB, 5000);
-    } else {
-      process.exit(1);
-    }
-  }
-};
-
-// Function to fix database indexes automatically
-const fixDatabaseIndexes = async () => {
-  try {
-    console.log('🔧 Checking and fixing database indexes...');
-    
-    const db = mongoose.connection.db;
-    const collection = db.collection('codestates');
-    
-    // Try to drop the problematic index
-    try {
-      await collection.dropIndex('operations.operationId_1');
-      console.log('✅ Dropped problematic index: operations.operationId_1');
-    } catch (error) {
-      if (error.code === 27) {
-        console.log('ℹ️  Index operations.operationId_1 does not exist (already fixed)');
-      } else {
-        console.log('ℹ️  Could not drop index (might not exist):', error.message);
-      }
-    }
-    
-    // Clean up documents with null operationId
-    try {
-      const result = await collection.updateMany(
-        { 'operations.operationId': null },
-        { 
-          $pull: { 
-            operations: { operationId: null } 
-          } 
-        }
-      );
-      
-      if (result.modifiedCount > 0) {
-        console.log(`✅ Cleaned up ${result.modifiedCount} documents with null operationId`);
-      }
-    } catch (error) {
-      console.log('ℹ️  Error cleaning up null operationIds:', error.message);
-    }
-    
-    console.log('🎉 Database index fix completed');
-    
-  } catch (error) {
-    console.error('❌ Error fixing database indexes:', error.message);
-    // Don't crash the server for index issues
-  }
-};
-
-// Call the connection
-connectDB();
-
-// MongoDB event handlers
-mongoose.connection.on('error', (err) => {
-  console.error('❌ MongoDB connection error:', err);
-});
-
-mongoose.connection.on('disconnected', () => {
-  console.log('📡 MongoDB disconnected');
-  if (process.env.NODE_ENV === 'production') {
-    setTimeout(connectDB, 5000);
-  }
 });
 
 // API Routes
@@ -262,17 +107,39 @@ app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/execute', executeRoutes);
 
-// Real-time collaboration state management
-const activeSessions = new Map();
-const userSockets = new Map();
-const sessionCode = new Map();
-const sessionCursors = new Map();
+// MongoDB connection with improved error handling
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => {
+  console.log('✅ Connected to MongoDB');
+})
+.catch((error) => {
+  console.error('❌ MongoDB connection error:', error);
+  process.exit(1);
+});
 
-// Socket.io connection handling with enhanced error handling
+// MongoDB connection event handlers
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('📡 MongoDB disconnected');
+});
+
+// Real-time collaboration state management
+const activeSessions = new Map(); // sessionId -> Map of socketId -> userData
+const userSockets = new Map(); // userId -> socketId
+const sessionCode = new Map(); // sessionId -> current code content
+const sessionCursors = new Map(); // sessionId -> Map of socketId -> cursor position
+
+// Socket.io connection handling
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // Handle user authentication
+  // Handle user authentication (improved)
   socket.on('authenticate', (userData) => {
     try {
       if (!userData || !userData.id || !userData.username) {
@@ -289,7 +156,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Join collaborative session
+  // Join collaborative session (improved validation)
   socket.on('join-session', async (data) => {
     const { sessionId, user } = data;
     
@@ -304,59 +171,106 @@ io.on('connection', (socket) => {
     }
 
     try {
+      // Join the Socket.io room
       socket.join(sessionId);
       socket.currentSession = sessionId;
 
+      // Initialize session maps if needed
       if (!activeSessions.has(sessionId)) {
         activeSessions.set(sessionId, new Map());
         sessionCode.set(sessionId, '// Welcome to CodeCollab!\n// Start typing to collaborate in real-time\n\nconsole.log("Hello, World!");');
         sessionCursors.set(sessionId, new Map());
       }
 
+      // Add user to session
       const sessionUsers = activeSessions.get(sessionId);
-      sessionUsers.set(socket.id, user);
-
-      const participants = Array.from(sessionUsers.values());
-      const currentCode = sessionCode.get(sessionId);
-
-      socket.emit('session-joined', {
-        participants,
-        currentCode,
-        sessionId
+      sessionUsers.set(socket.id, {
+        ...user,
+        socketId: socket.id,
+        joinedAt: new Date(),
+        isTyping: false,
+        status: 'active',
+        cursor: { line: 0, column: 0 }
       });
 
+      // Send current code to new user
+      const currentCode = sessionCode.get(sessionId);
+      socket.emit('code-sync', { code: currentCode });
+
+      // Send current participants to new user
+      const participants = Array.from(sessionUsers.values());
+      socket.emit('session-participants', participants);
+
+      // Notify others about new user
       socket.to(sessionId).emit('user-joined', {
-        user,
+        user: user,
         socketId: socket.id,
         timestamp: new Date()
       });
 
+      // Broadcast updated participant count
+      io.to(sessionId).emit('participant-count-update', participants.length);
+
       console.log(`👥 User ${user.username} joined session ${sessionId}`);
 
     } catch (error) {
-      console.error('Join session error:', error);
-      socket.emit('error', { message: 'Failed to join session' });
+      console.error('Error joining session:', error);
+      socket.emit('error', { 
+        message: 'Failed to join session',
+        code: 'JOIN_SESSION_ERROR'
+      });
     }
   });
 
-  // Handle code changes
+  // Handle real-time code changes
   socket.on('code-change', (data) => {
     const { sessionId, code, operation } = data;
     
-    if (!sessionId || code === undefined) return;
+    if (!sessionId || !socket.currentSession) {
+      return;
+    }
 
     try {
+      // Update stored code
       sessionCode.set(sessionId, code);
-      
+
+      // Broadcast code change to all other users in session
       socket.to(sessionId).emit('code-change', {
-        code,
-        operation,
+        code: code,
+        operation: operation,
         from: socket.userData?.username || 'Anonymous',
+        socketId: socket.id,
         timestamp: new Date()
       });
 
+      // Update user typing status
+      const sessionUsers = activeSessions.get(sessionId);
+      if (sessionUsers && sessionUsers.has(socket.id)) {
+        const userData = sessionUsers.get(socket.id);
+        userData.isTyping = true;
+        userData.lastActivity = new Date();
+        
+        // Clear typing status after 2 seconds
+        setTimeout(() => {
+          if (sessionUsers.has(socket.id)) {
+            sessionUsers.get(socket.id).isTyping = false;
+            socket.to(sessionId).emit('typing-status-update', {
+              socketId: socket.id,
+              isTyping: false
+            });
+          }
+        }, 2000);
+
+        // Broadcast typing status
+        socket.to(sessionId).emit('typing-status-update', {
+          socketId: socket.id,
+          username: userData.username,
+          isTyping: true
+        });
+      }
+
     } catch (error) {
-      console.error('Code change error:', error);
+      console.error('Error handling code change:', error);
     }
   });
 
@@ -367,32 +281,38 @@ io.on('connection', (socket) => {
     if (!sessionId || !position) return;
 
     try {
+      // Update cursor position
       const cursors = sessionCursors.get(sessionId);
       if (cursors) {
-        cursors.set(socket.id, {
-          ...position,
-          username: socket.userData?.username || 'Anonymous',
-          timestamp: new Date()
-        });
-
+        cursors.set(socket.id, position);
+        
+        // Broadcast cursor position to others
         socket.to(sessionId).emit('cursor-update', {
           socketId: socket.id,
-          position,
-          username: socket.userData?.username || 'Anonymous'
+          username: socket.userData?.username,
+          position: position,
+          color: socket.userData?.color || '#667eea'
         });
       }
     } catch (error) {
-      console.error('Cursor position error:', error);
+      console.error('Error updating cursor position:', error);
     }
   });
 
-  // Handle code execution
+  // Handle code execution requests
   socket.on('execute-code', async (data) => {
     const { sessionId, code, language, input } = data;
     
-    if (!sessionId || !code || !language) return;
+    if (!sessionId) return;
 
     try {
+      // Notify session about execution start
+      io.to(sessionId).emit('execution-started', {
+        username: socket.userData?.username || 'Anonymous',
+        language: language
+      });
+
+      // Execute code via Piston API
       const axios = require('axios');
       const response = await axios.post(`${process.env.PISTON_API_URL}/execute`, {
         language: language,
@@ -409,6 +329,7 @@ io.on('connection', (socket) => {
         timestamp: new Date()
       };
 
+      // Broadcast execution result to session
       io.to(sessionId).emit('execution-result', {
         result: result,
         executedBy: socket.userData?.username || 'Anonymous'
@@ -437,6 +358,7 @@ io.on('connection', (socket) => {
       socketId: socket.id
     };
 
+    // Broadcast to session
     io.to(sessionId).emit('chat-message', chatMessage);
   });
 
@@ -449,67 +371,65 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('🔌 User disconnected:', socket.id);
     
+    // Remove from user sockets map
     if (socket.userData && socket.userData.id) {
       userSockets.delete(socket.userData.id);
     }
 
+    // Handle leaving current session
     if (socket.currentSession) {
       handleUserLeaveSession(socket, socket.currentSession);
     }
   });
 
-  // Error handling
-  socket.on('error', (error) => {
-    console.error('Socket error:', error);
-  });
-});
+  // Helper function to handle user leaving session
+  function handleUserLeaveSession(socket, sessionId) {
+    try {
+      const sessionUsers = activeSessions.get(sessionId);
+      if (sessionUsers && sessionUsers.has(socket.id)) {
+        const userData = sessionUsers.get(socket.id);
+        sessionUsers.delete(socket.id);
 
-// Helper function to handle user leaving session
-function handleUserLeaveSession(socket, sessionId) {
-  try {
-    const sessionUsers = activeSessions.get(sessionId);
-    if (sessionUsers && sessionUsers.has(socket.id)) {
-      const userData = sessionUsers.get(socket.id);
-      sessionUsers.delete(socket.id);
+        // Remove cursor
+        const cursors = sessionCursors.get(sessionId);
+        if (cursors) {
+          cursors.delete(socket.id);
+        }
 
-      // Remove cursor
-      const cursors = sessionCursors.get(sessionId);
-      if (cursors) {
-        cursors.delete(socket.id);
+        // Notify others about user leaving
+        socket.to(sessionId).emit('user-left', {
+          user: userData,
+          socketId: socket.id,
+          timestamp: new Date()
+        });
+
+        // Update participant count
+        const remainingParticipants = Array.from(sessionUsers.values());
+        io.to(sessionId).emit('participant-count-update', remainingParticipants.length);
+
+        // Leave the socket room
+        socket.leave(sessionId);
+
+        console.log(`👋 User ${userData.username} left session ${sessionId}`);
+
+        // Clean up empty sessions
+        if (sessionUsers.size === 0) {
+          activeSessions.delete(sessionId);
+          sessionCode.delete(sessionId);
+          sessionCursors.delete(sessionId);
+          console.log(`🗑️ Cleaned up empty session ${sessionId}`);
+        }
       }
-
-      // Notify others about user leaving
-      socket.to(sessionId).emit('user-left', {
-        user: userData,
-        socketId: socket.id,
-        timestamp: new Date()
-      });
-
-      // Update participant count
-      const remainingParticipants = Array.from(sessionUsers.values());
-      io.to(sessionId).emit('participant-count-update', remainingParticipants.length);
-
-      // Leave the socket room
-      socket.leave(sessionId);
-
-      console.log(`👋 User ${userData.username} left session ${sessionId}`);
-
-      // Clean up empty sessions
-      if (sessionUsers.size === 0) {
-        activeSessions.delete(sessionId);
-        sessionCode.delete(sessionId);
-        sessionCursors.delete(sessionId);
-        console.log(`🗑️ Cleaned up empty session ${sessionId}`);
-      }
+    } catch (error) {
+      console.error('Error handling user leave:', error);
     }
-  } catch (error) {
-    console.error('Error handling user leave:', error);
   }
-}
+});
 
 // Error handling middleware for MongoDB errors
 app.use('/api', (err, req, res, next) => {
   if (err.code === 11000) {
+    // Duplicate key error
     const field = Object.keys(err.keyPattern)[0];
     return res.status(409).json({
       error: `This ${field} is already in use`
@@ -535,32 +455,9 @@ app.use('*', (req, res) => {
   });
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    mongoose.connection.close(false, () => {
-      console.log('Process terminated');
-      process.exit(0);
-    });
-  });
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
-
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 CodeCollab server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV}`);
-  console.log(`🌐 CORS Origins:`, corsOrigins);
-  console.log(`🔗 Railway URL: https://codecollab-backend-production-783d.up.railway.app`);
+  console.log(`🌐 CORS Origin: ${corsOrigin}`);
 });

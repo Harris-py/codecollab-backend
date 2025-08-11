@@ -1,7 +1,6 @@
-// Session.js - Fixed model with currentCode field
 const mongoose = require('mongoose');
 
-// Helper function to generate unique 6-character session code
+// Helper function to generate unique session code
 const generateSessionCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let result = '';
@@ -12,51 +11,55 @@ const generateSessionCode = () => {
 };
 
 const sessionSchema = new mongoose.Schema({
-  // Basic session information
+  // Session Basic Information
   name: {
     type: String,
-    required: true,
+    required: [true, 'Session name is required'],
     trim: true,
-    minlength: 3,
-    maxlength: 100
+    minlength: [3, 'Session name must be at least 3 characters'],
+    maxlength: [50, 'Session name cannot exceed 50 characters']
   },
   description: {
     type: String,
     trim: true,
-    maxlength: 500,
+    maxlength: [200, 'Description cannot exceed 200 characters'],
     default: ''
   },
   
-  // Unique 6-character session code for joining
+  // Session ID for joining (6-character code) - FIXED
   sessionCode: {
     type: String,
     required: true,
     unique: true,
-    uppercase: true,
     length: 6,
-    match: /^[A-Z0-9]{6}$/
+    uppercase: true,
+    default: generateSessionCode
   },
 
-  // Programming language for the session
+  // Programming Language
   language: {
     type: String,
-    required: true,
-    enum: ['javascript', 'python', 'cpp', 'c', 'java', 'go', 'rust'],
+    required: [true, 'Programming language is required'],
+    enum: {
+      values: ['javascript', 'python', 'cpp', 'c', 'java', 'go', 'rust'],
+      message: 'Unsupported programming language'
+    },
     default: 'javascript'
   },
 
-  // Current code content in the session
-  currentCode: {
+  // Code Content
+  code: {
     type: String,
     default: function() {
+      // Return language-specific template
       const templates = {
-        'javascript': '// Welcome to CodeCollab - JavaScript Session\n// Start coding together in real-time!\n\nconsole.log("Hello, World!");',
-        'python': '# Welcome to CodeCollab - Python Session\n# Start coding together in real-time!\n\nprint("Hello, World!")',
-        'cpp': '// Welcome to CodeCollab - C++ Session\n// Start coding together in real-time!\n\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, World!" << endl;\n    return 0;\n}',
-        'c': '// Welcome to CodeCollab - C Session\n// Start coding together in real-time!\n\n#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}',
-        'java': '// Welcome to CodeCollab - Java Session\n// Start coding together in real-time!\n\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, World!");\n    }\n}',
-        'go': '// Welcome to CodeCollab - Go Session\n// Start coding together in real-time!\n\npackage main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, World!")\n}',
-        'rust': '// Welcome to CodeCollab - Rust Session\n// Start coding together in real-time!\n\nfn main() {\n    println!("Hello, World!");\n}'
+        javascript: '// Welcome to CodeCollab - JavaScript Session\n// Start coding together in real-time!\n\nconsole.log("Hello, World!");',
+        python: '# Welcome to CodeCollab - Python Session\n# Start coding together in real-time!\n\nprint("Hello, World!")',
+        cpp: '// Welcome to CodeCollab - C++ Session\n// Start coding together in real-time!\n\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, World!" << endl;\n    return 0;\n}',
+        c: '// Welcome to CodeCollab - C Session\n// Start coding together in real-time!\n\n#include <stdio.h>\n\nint main() {\n    printf("Hello, World!\\n");\n    return 0;\n}',
+        java: '// Welcome to CodeCollab - Java Session\n// Start coding together in real-time!\n\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, World!");\n    }\n}',
+        go: '// Welcome to CodeCollab - Go Session\n// Start coding together in real-time!\n\npackage main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println("Hello, World!")\n}',
+        rust: '// Welcome to CodeCollab - Rust Session\n// Start coding together in real-time!\n\nfn main() {\n    println!("Hello, World!");\n}'
       };
       return templates[this.language] || templates.javascript;
     }
@@ -273,36 +276,89 @@ sessionSchema.pre('save', async function(next) {
     }
     
     if (!unique) {
-      return next(new Error('Unable to generate unique session code'));
+      return next(new Error('Failed to generate unique session code'));
     }
   }
-  next();
-});
-
-// Pre-save middleware to update lastActivity
-sessionSchema.pre('save', function(next) {
+  
+  // Update lastActivity
   if (this.isModified() && !this.isModified('lastActivity')) {
     this.lastActivity = new Date();
+    // Extend expiration by 24 hours
+    this.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   }
+  
   next();
 });
 
-// Instance method to add code change to history
-sessionSchema.methods.addCodeChange = function(code, userId, changeType = 'modified') {
+// Instance method to add participant
+sessionSchema.methods.addParticipant = function(user, role = 'editor') {
+  // Check if user already in session
+  const existingParticipant = this.activeParticipants.find(
+    p => p.user.toString() === user._id.toString()
+  );
+  
+  if (existingParticipant) {
+    // Update existing participant
+    existingParticipant.isActive = true;
+    existingParticipant.joinedAt = new Date();
+    existingParticipant.lastActivity = new Date();
+    existingParticipant.role = role;
+  } else {
+    // Add new participant
+    const colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#ffecd2'];
+    const color = colors[this.activeParticipants.length % colors.length];
+    
+    this.activeParticipants.push({
+      user: user._id,
+      username: user.username,
+      joinedAt: new Date(),
+      role: role,
+      isActive: true,
+      lastActivity: new Date(),
+      cursor: { line: 0, column: 0 },
+      color: color
+    });
+    
+    this.stats.totalParticipants += 1;
+  }
+  
+  this.lastActivity = new Date();
+  return this.save();
+};
+
+// Instance method to remove participant
+sessionSchema.methods.removeParticipant = function(userId) {
+  const participantIndex = this.activeParticipants.findIndex(
+    p => p.user.toString() === userId.toString()
+  );
+  
+  if (participantIndex !== -1) {
+    this.activeParticipants[participantIndex].isActive = false;
+    this.lastActivity = new Date();
+    return this.save();
+  }
+  
+  return Promise.resolve(this);
+};
+
+// Instance method to update code
+sessionSchema.methods.updateCode = function(newCode, userId) {
+  this.code = newCode;
+  this.stats.totalCodeChanges += 1;
+  this.stats.linesOfCode = newCode.split('\n').length;
+  
+  // Add to code history (keep last 50 changes)
   this.codeHistory.unshift({
-    code: code,
+    code: newCode,
     changedBy: userId,
     timestamp: new Date(),
-    changeType: changeType
+    changeType: 'modified'
   });
   
-  // Keep only last 50 changes
   if (this.codeHistory.length > 50) {
     this.codeHistory = this.codeHistory.slice(0, 50);
   }
   
-  this.stats.totalCodeChanges += 1;
-  this.currentCode = code;
   this.lastActivity = new Date();
   return this.save();
 };
@@ -383,3 +439,5 @@ sessionSchema.statics.cleanupExpiredSessions = async function() {
 };
 
 module.exports = mongoose.model('Session', sessionSchema);
+
+
