@@ -1,3 +1,4 @@
+
 // server.js - Updated with automatic index fix
 const express = require('express');
 const http = require('http');
